@@ -291,7 +291,7 @@ export default function App() {
   const [generating, setGenerating] = useState(false)
   const [genError, setGenError]     = useState(null)
 
-  const [ttsVoice, setTtsVoice]       = useState({ gender: 'male', accent: 'american', speed: 1.0 })
+  const [ttsVoice, setTtsVoice]       = useState({ gender: 'male', accent: 'british', speed: 1.0 })
   const [ttsPlaying, setTtsPlaying]   = useState(false)
   const [chunksExpanded, setChunksExpanded] = useState(true)
 

@@ -1,7 +1,7 @@
 const VOICE_MAP = {
   'american-female': 'en-US-JennyNeural',
-  'american-male':   'en-US-GuyNeural',
-  'british-female':  'en-GB-LibbyNeural',
+  'american-male':   'en-US-DavisNeural',
+  'british-female':  'en-GB-SoniaNeural',
   'british-male':    'en-GB-RyanNeural',
 }
 
