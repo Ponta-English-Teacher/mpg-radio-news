@@ -246,10 +246,7 @@ function extractChunks(scriptText) {
 // ── Chunk Card ────────────────────────────────────────────────────────────────
 
 function ChunkCard({ text, voice }) {
-  const [recUrl, setRecUrl]     = useState(null)
-  const [recording, setRecording] = useState(false)
   const [speaking, setSpeaking] = useState(false)
-  const mrRef    = useRef(null)
   const audioRef = useRef(null)
 
   async function speak() {
@@ -271,22 +268,6 @@ function ChunkCard({ text, voice }) {
     }
   }
 
-  async function startRec() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const mr = new MediaRecorder(stream)
-    const chunks = []
-    mr.ondataavailable = e => chunks.push(e.data)
-    mr.onstop = () => {
-      stream.getTracks().forEach(t => t.stop())
-      setRecUrl(URL.createObjectURL(new Blob(chunks, { type: 'audio/webm' })))
-    }
-    mrRef.current = mr
-    mr.start()
-    setRecording(true)
-  }
-
-  function stopRec() { mrRef.current?.stop(); setRecording(false) }
-
   return (
     <div className="chunk-card">
       <div className="chunk-text">{text}</div>
@@ -294,12 +275,7 @@ function ChunkCard({ text, voice }) {
         <button className="btn-sm" onClick={speak} disabled={speaking}>
           {speaking ? '⏳' : '▶ Listen'}
         </button>
-        {recording
-          ? <button className="btn-sm btn-rec-on" onClick={stopRec}>⏹ Stop</button>
-          : <button className="btn-sm" onClick={startRec}>● Record</button>
-        }
       </div>
-      {recUrl && <audio src={recUrl} controls className="mini-audio" />}
     </div>
   )
 }
