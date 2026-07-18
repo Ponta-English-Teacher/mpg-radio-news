@@ -1,24 +1,16 @@
+import OpenAI from 'openai'
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+})
+
+// Keep the current interface unchanged.
+// Existing accent/gender choices are mapped to OpenAI voices.
 const VOICE_MAP = {
-  'american-female': 'en-US-JennyNeural',
-  'american-male':   'en-US-DavisNeural',
-  'british-female':  'en-GB-SoniaNeural',
-  'british-male':    'en-GB-RyanNeural',
-}
-
-function speedToRate(speed) {
-  const s = parseFloat(speed) || 1.0
-  if (s <= 0.8) return '-20%'
-  if (s >= 1.2) return '+20%'
-  return '0%'
-}
-
-function escapeXml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;')
+  'american-female': 'coral',
+  'american-male': 'echo',
+  'british-female': 'shimmer',
+  'british-male': 'onyx',
 }
 
 export default async function handler(req, res) {
@@ -27,48 +19,42 @@ export default async function handler(req, res) {
   }
 
   const { text, accent, gender, speed } = req.body ?? {}
+
   if (!text?.trim()) {
     return res.status(400).json({ error: 'Text is required.' })
   }
 
-  const key    = process.env.AZURE_SPEECH_KEY
-  const region = process.env.AZURE_SPEECH_REGION
-  if (!key || !region) {
-    return res.status(500).json({ error: 'Azure Speech not configured.' })
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: 'OpenAI API key is not configured.' })
   }
 
   const voiceKey = `${accent || 'american'}-${gender || 'male'}`
-  const voice    = VOICE_MAP[voiceKey] || 'en-US-GuyNeural'
-  const rate     = speedToRate(speed)
+  const voice = VOICE_MAP[voiceKey] || 'echo'
 
-  const ssml = `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="en-US"><voice name="${voice}"><prosody rate="${rate}">${escapeXml(text.trim())}</prosody></voice></speak>`
+  const numericSpeed = Number.parseFloat(speed)
+  const speechSpeed = Number.isFinite(numericSpeed)
+    ? Math.min(4, Math.max(0.25, numericSpeed))
+    : 1
 
   try {
-    const ttsRes = await fetch(
-      `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`,
-      {
-        method: 'POST',
-        headers: {
-          'Ocp-Apim-Subscription-Key': key,
-          'Content-Type': 'application/ssml+xml',
-          'X-Microsoft-OutputFormat': 'audio-16khz-128kbitrate-mono-mp3',
-        },
-        body: ssml,
-      }
-    )
+    const audio = await openai.audio.speech.create({
+      model: 'gpt-4o-mini-tts',
+      voice,
+      input: text.trim(),
+      speed: speechSpeed,
+      response_format: 'mp3',
+    })
 
-    if (!ttsRes.ok) {
-      const errText = await ttsRes.text()
-      return res.status(ttsRes.status).json({ error: `Azure TTS error: ${errText}` })
-    }
-
-    const arrayBuffer = await ttsRes.arrayBuffer()
-    const buffer      = Buffer.from(arrayBuffer)
+    const buffer = Buffer.from(await audio.arrayBuffer())
 
     res.setHeader('Content-Type', 'audio/mpeg')
     res.setHeader('Content-Length', buffer.length)
     res.send(buffer)
-  } catch (err) {
-    return res.status(500).json({ error: `TTS request failed: ${err.message}` })
+  } catch (error) {
+    console.error('OpenAI TTS error:', error)
+
+    return res.status(error.status || 500).json({
+      error: `OpenAI TTS error: ${error.message}`,
+    })
   }
 }
