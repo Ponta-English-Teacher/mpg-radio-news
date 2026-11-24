@@ -1,3 +1,4 @@
+import { saveScript, saveAudio, loadScripts, loadAudio } from './local-audio.js'
 import { useState, useRef, useEffect } from 'react'
 import './App.css'
 import SimpleRecorder from './components/SimpleRecorder'
@@ -247,37 +248,20 @@ function extractChunks(scriptText) {
 
 function ChunkCard({ text, voice }) {
   const [speaking, setSpeaking] = useState(false)
-  const audioRef = useRef(null)
-
-  async function speak() {
-    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+  function speak() {
+    if (!window.speechSynthesis) return
+    window.speechSynthesis.cancel()
+    const utterance = new SpeechSynthesisUtterance(text)
+    utterance.lang = voice.accent === 'british' ? 'en-GB' : 'en-US'
+    utterance.rate = voice.speed
+    const available = window.speechSynthesis.getVoices().filter(v => v.lang.replace('_','-') === utterance.lang)
+    const preferred = available.find(v => voice.gender === 'female' ? /female|samantha|victoria|karen|kate/i.test(v.name) : /male|daniel|alex|fred|tom/i.test(v.name) && !/female/i.test(v.name))
+    if (preferred || available[0]) utterance.voice = preferred || available[0]
+    utterance.onend = utterance.onerror = () => setSpeaking(false)
     setSpeaking(true)
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, accent: voice.accent, gender: voice.gender, speed: voice.speed }),
-      })
-      if (!res.ok) throw new Error('TTS failed')
-      const audio = new Audio(URL.createObjectURL(await res.blob()))
-      audioRef.current = audio
-      audio.onended = () => { audioRef.current = null; setSpeaking(false) }
-      audio.play()
-    } catch {
-      setSpeaking(false)
-    }
+    window.speechSynthesis.speak(utterance)
   }
-
-  return (
-    <div className="chunk-card">
-      <div className="chunk-text">{text}</div>
-      <div className="chunk-btns">
-        <button className="btn-sm" onClick={speak} disabled={speaking}>
-          {speaking ? '⏳' : '▶ Listen'}
-        </button>
-      </div>
-    </div>
-  )
+  return <div className="chunk-card"><div className="chunk-text">{text}</div><div className="chunk-btns"><button className="btn-sm" onClick={speak} disabled={speaking}>{speaking ? '⏳' : '▶ Listen'}</button></div></div>
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -328,7 +312,31 @@ export default function App() {
   const [genError, setGenError]     = useState(null)
 
   const [ttsVoice, setTtsVoice]       = useState({ gender: 'male', accent: 'british', speed: 1.0 })
-  const [ttsPlaying, setTtsPlaying]   = useState(false)
+  const [ttsPlaying, setTtsPlaying] = useState(false)
+  const [ttsBusy, setTtsBusy] = useState(false)
+  const [ttsError, setTtsError] = useState('')
+  const [audioUsage, setAudioUsage] = useState(null)
+  const [savedAudio, setSavedAudio] = useState([])
+  const [history, setHistory] = useState([])
+  const [ticket, setTicket] = useState('')
+  const [scriptEmail, setScriptEmail] = useState('')
+  const audioLock = useRef(false)
+  const audioObjectUrl = useRef(null)
+  useEffect(() => {
+    let cancelled = false
+    if (emailValid) loadScripts(normalizedEmail).then(items => { if (!cancelled) setHistory(items) }).catch(() => { if (!cancelled) setHistory([]) })
+    return () => { cancelled = true }
+  }, [normalizedEmail, emailValid])
+  useEffect(() => {
+    if (!ticket || scriptEmail !== normalizedEmail) return
+    let cancelled = false
+    const controller = new AbortController()
+    loadAudio(ticket).then(items => { if (!cancelled) setSavedAudio(items) }).catch(() => { if (!cancelled) setTtsError('Local audio storage is unavailable.') })
+    fetch('/api/tts', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:normalizedEmail,ticket,action:'usage'}),signal:controller.signal})
+      .then(async response => { const data=await response.json(); if(!response.ok) throw Error(data.error); if(!cancelled) setAudioUsage(data.usage) })
+      .catch(error => {if(!cancelled) setTtsError(error.message || 'Could not check audio allowance.')})
+    return () => {cancelled=true;controller.abort()}
+  }, [ticket, scriptEmail, normalizedEmail, dayTick])
   const [chunksExpanded, setChunksExpanded] = useState(true)
 
   const [isRecording, setIsRecording] = useState(false)
@@ -336,7 +344,7 @@ export default function App() {
 
   // ── generate script (AI) ──
   async function generate() {
-    if (!keywords.trim() || !emailValid || !activeUsage || activeUsage.remaining <= 0 || generating) return
+    if (!keywords.trim() || !emailValid || !activeUsage || activeUsage.remaining <= 0 || generating || ttsBusy) return
     setGenerating(true)
     setGenError(null)
     try {
@@ -348,16 +356,12 @@ export default function App() {
       const data = await res.json()
       if (data.usage) setUsage({ ...data.usage, email: normalizedEmail })
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`)
-      setScript({
-        opening:  data.opening,
-        topStory: data.topStory,
-        mainNews: data.mainNews,
-        closing:  data.closing,
-      })
-      setChunks(Array.isArray(data.chunks) && data.chunks.length > 0
-        ? data.chunks
-        : extractChunks(`${data.mainNews} ${data.topStory}`)
-      )
+      const nextScript = { opening:data.opening, topStory:data.topStory, mainNews:data.mainNews, closing:data.closing }
+      const nextChunks = Array.isArray(data.chunks) && data.chunks.length ? data.chunks : extractChunks(data.mainNews + ' ' + data.topStory)
+      const record = {ticket:data.ticket,email:normalizedEmail,script:nextScript,chunks:nextChunks,created:Date.now()}
+      openSavedScript(record)
+      try { await saveScript(record); setHistory(items => [record,...items]) }
+      catch { setTtsError('Could not save the script on this device. Keep this page open.') }
       setChunksExpanded(true)
     } catch (err) {
       setGenError(err.message)
@@ -367,46 +371,46 @@ export default function App() {
     }
   }
 
-  // ── TTS (Azure) ──
-  async function speakFull() {
-    if (!script) return
-    if (ttsAudioRef.current) {
-      ttsAudioRef.current.pause()
-      ttsAudioRef.current = null
-    }
-    setTtsPlaying(true)
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text:   scriptToText(script),
-          accent: ttsVoice.accent,
-          gender: ttsVoice.gender,
-          speed:  ttsVoice.speed,
-        }),
-      })
-      if (!res.ok) {
-        const data = await res.json()
-        throw new Error(data.error || `TTS error ${res.status}`)
-      }
-      const blob  = await res.blob()
-      const url   = URL.createObjectURL(blob)
-      const audio = new Audio(url)
-      ttsAudioRef.current = audio
-      audio.onended = () => { ttsAudioRef.current = null; setTtsPlaying(false) }
-      audio.play()
-    } catch (err) {
-      console.error('TTS error:', err)
-      setTtsPlaying(false)
-    }
-  }
   function stopTts() {
-    if (ttsAudioRef.current) {
-      ttsAudioRef.current.pause()
-      ttsAudioRef.current = null
-    }
+    if (ttsAudioRef.current) { ttsAudioRef.current.pause(); ttsAudioRef.current = null }
+    if (audioObjectUrl.current) { URL.revokeObjectURL(audioObjectUrl.current); audioObjectUrl.current = null }
     setTtsPlaying(false)
+  }
+  function openSavedScript(record) {
+    stopTts()
+    setScript(record.script); setChunks(record.chunks); setTicket(record.ticket); setScriptEmail(record.email)
+    setSavedAudio([]); setAudioUsage(null); setTtsError(''); setChunksExpanded(true)
+  }
+  async function playSaved(record) {
+    stopTts()
+    const url=URL.createObjectURL(record.blob)
+    audioObjectUrl.current=url
+    const audio=new Audio(url)
+    ttsAudioRef.current=audio
+    audio.onended=()=>{if(ttsAudioRef.current===audio) stopTts()}
+    setTtsPlaying(true)
+    try { await audio.play() } catch { stopTts(); setTtsError('Playback failed. Please try again.') }
+  }
+  async function speakFull() {
+    if (!ticket || scriptEmail !== normalizedEmail || audioLock.current) return
+    const selected={...ttsVoice}
+    const existing=savedAudio.find(x=>x.accent===selected.accent && x.gender===selected.gender && x.speed===selected.speed)
+    if(existing){await playSaved(existing);return}
+    if(!audioUsage || audioUsage.daily>=20 || audioUsage.perScript>=2) return
+    audioLock.current=true
+    setTtsBusy(true);setTtsError('')
+    try {
+      const response=await fetch('/api/tts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:normalizedEmail,ticket,...selected})})
+      if(!response.ok){const data=await response.json();if(data.usage)setAudioUsage(data.usage);throw Error(data.error||'Audio generation failed.')}
+      const usageHeader=response.headers.get('X-Audio-Usage')
+      if(usageHeader)setAudioUsage(JSON.parse(usageHeader))
+      const blob=await response.blob()
+      const record={id:crypto.randomUUID(),ticket,...selected,blob,created:Date.now()}
+      setSavedAudio(items=>[...items,record])
+      try { await saveAudio(record) } catch { setTtsError('Audio could not be saved permanently. You can replay it until you close this page.') }
+      await playSaved(record)
+    }catch(error){setTtsError(error.message);setDayTick(t=>t+1)}
+    finally{audioLock.current=false;setTtsBusy(false)}
   }
 
   const onAir = isRecording
@@ -438,7 +442,7 @@ export default function App() {
             <input className="field" placeholder="Your name (e.g. Taro Yamada)"
               value={studentName} onChange={e => setStudentName(e.target.value)} />
             <input className="field" type="email" required autoComplete="email" aria-label="Email address (required)" placeholder="Email address (required)"
-              disabled={generating} value={email} onChange={e => { setEmail(e.target.value); if (e.target.value.trim().toLowerCase() !== normalizedEmail) { setUsage(null); setUsageLoading(false); setUsageError(''); setGenError(null) } }} />
+              disabled={generating || ttsBusy} value={email} onChange={e => { setEmail(e.target.value); if (e.target.value.trim().toLowerCase() !== normalizedEmail) { setUsage(null); setUsageLoading(false); setUsageError(''); setGenError(null); setHistory([]); stopTts(); setScript(null); setTicket(''); setSavedAudio([]); setAudioUsage(null) } }} />
             <input className="field" placeholder="Student ID (optional, recording filename only)" value={studentId} onChange={e => setStudentId(e.target.value)} />
           </div>
 
@@ -456,7 +460,7 @@ export default function App() {
             </> : <p>{!emailValid ? 'Enter a valid email address to check your daily allowance.' : usageError || (usageLoading ? 'Checking daily usage…' : 'Checking daily usage…')}</p>}
             {usageError && <button type="button" className="btn-secondary" onClick={() => setDayTick(t => t + 1)}>Retry usage check</button>}
           </div>
-          <button className="btn-primary" onClick={generate} disabled={generating || !emailValid || !activeUsage || activeUsage.remaining <= 0}>
+          <button className="btn-primary" onClick={generate} disabled={generating || ttsBusy || !emailValid || !activeUsage || activeUsage.remaining <= 0}>
             {generating ? '⏳ Generating…' : '📰 Generate News Script'}
           </button>
 
@@ -466,6 +470,10 @@ export default function App() {
             </div>
           )}
 
+          {emailValid && history.length > 0 && <div className="daily-usage"><label className="ctrl-label">Saved news on this device
+            <select className="select" value={ticket} disabled={generating || ttsBusy} onChange={e=>{const record=history.find(x=>x.ticket===e.target.value);if(record)openSavedScript(record)}}>
+              <option value="">Choose saved news</option>{history.map(item=><option key={item.ticket} value={item.ticket}>{new Date(item.created).toLocaleString()} — {item.script.topStory}</option>)}
+            </select></label></div>}
           {script && (
             <div className="script-card">
               <div className="script-body">
@@ -536,10 +544,16 @@ export default function App() {
                 </select>
               </label>
             </div>
-            {ttsPlaying
-              ? <button className="btn-secondary" onClick={stopTts}>⏹ Stop</button>
-              : <button className="btn-secondary" onClick={speakFull}>▶ Listen to Full Script</button>
-            }
+            <div className="daily-usage" aria-live="polite">
+              <p>Audio for this script: <strong>{audioUsage ? audioUsage.perScript + ' / 2' : 'Checking…'}</strong></p>
+              <p>Daily audio generation: <strong>{audioUsage ? audioUsage.daily + ' / 20' : 'Checking…'}</strong></p>
+              {audioUsage && audioUsage.perScript>=2 && <p>You have reached the audio generation limit for this news script. You can still listen to saved audio.</p>}
+              {audioUsage && audioUsage.daily>=20 && <p>You have reached your daily limit of 20 audio generations. Please try again tomorrow!</p>}
+              {ttsError && <p className="gen-error">{ttsError} <button className="btn-sm" onClick={()=>setDayTick(t=>t+1)}>Refresh allowance</button></p>}
+              {savedAudio.map((record,i)=><p key={record.id}><button className="btn-secondary" disabled={ttsBusy || generating} onClick={()=>playSaved(record)}>▶ Replay {i+1}: {record.accent} {record.gender}, {record.speed}×</button></p>)}
+            </div>
+            {ttsPlaying && <button className="btn-secondary" onClick={stopTts}>⏹ Stop</button>}
+            <button className="btn-secondary" onClick={speakFull} disabled={ttsBusy || generating || !ticket || (!savedAudio.some(x=>x.accent===ttsVoice.accent && x.gender===ttsVoice.gender && x.speed===ttsVoice.speed) && (!audioUsage || audioUsage.perScript>=2 || audioUsage.daily>=20))}>{ttsBusy?'Generating audio…':savedAudio.some(x=>x.accent===ttsVoice.accent && x.gender===ttsVoice.gender && x.speed===ttsVoice.speed)?'▶ Replay saved audio':'Generate audio and listen'}</button>
           </section>
         )}
 
@@ -554,7 +568,7 @@ export default function App() {
             </h2>
             {chunksExpanded ? (
               <>
-                <p className="hint">Practice these difficult words and phrases. Listen, then record yourself.</p>
+                <p className="hint">Practice these difficult words and phrases using your browser’s built-in voice. Listen, then record yourself.</p>
                 <div className="chunks-grid">
                   {chunks.map((c, i) => <ChunkCard key={i} text={c} voice={ttsVoice} />)}
                 </div>
