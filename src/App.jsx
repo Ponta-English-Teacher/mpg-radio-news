@@ -284,7 +284,42 @@ function ChunkCard({ text, voice }) {
 
 export default function App() {
   const [studentName, setStudentName] = useState('')
-  const [studentId, setStudentId]   = useState('')
+  const [email, setEmail] = useState('')
+  const [usage, setUsage] = useState(null)
+  const [usageError, setUsageError] = useState('')
+  const [usageLoading, setUsageLoading] = useState(false)
+  const [dayTick, setDayTick] = useState(0)
+  const normalizedEmail = email.trim().toLowerCase()
+  const emailValid = normalizedEmail.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+  const activeUsage = usage?.email === normalizedEmail && Date.parse(usage.resetAt) > Date.now() ? usage : null
+  useEffect(() => {
+    if (!activeUsage) return
+    const timer = setTimeout(() => setDayTick(t => t + 1), Math.max(0, Date.parse(activeUsage.resetAt) - Date.now()) + 100)
+    return () => clearTimeout(timer)
+  }, [activeUsage])
+  useEffect(() => {
+    if (!emailValid) return
+    const controller = new AbortController()
+    const timer = setTimeout(async () => {
+      setUsageLoading(true)
+      setUsageError('')
+      try {
+        const response = await fetch('/api/generate-news', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ email: normalizedEmail, action: 'usage' }),
+          signal: controller.signal,
+        })
+        const data = await response.json()
+        if (!response.ok) throw new Error(data.error || 'Could not check daily usage.')
+        if (!controller.signal.aborted) setUsage({ ...data.usage, email: normalizedEmail })
+      } catch (error) {
+        if (!controller.signal.aborted) setUsageError(error.message)
+      } finally {
+        if (!controller.signal.aborted) setUsageLoading(false)
+      }
+    }, 400)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [normalizedEmail, emailValid, dayTick])
   const [keywords, setKeywords]     = useState('')
   const [script, setScript]         = useState(null)
   const [chunks, setChunks]         = useState([])
@@ -300,16 +335,17 @@ export default function App() {
 
   // ── generate script (AI) ──
   async function generate() {
-    if (!keywords.trim()) return
+    if (!keywords.trim() || !emailValid || !activeUsage || activeUsage.remaining <= 0 || generating) return
     setGenerating(true)
     setGenError(null)
     try {
       const res = await fetch('/api/generate-news', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ studentName, studentId, keywords }),
+        body: JSON.stringify({ studentName, email: normalizedEmail, keywords }),
       })
       const data = await res.json()
+      if (data.usage) setUsage({ ...data.usage, email: normalizedEmail })
       if (!res.ok) throw new Error(data.error || `Server error ${res.status}`)
       setScript({
         opening:  data.opening,
@@ -399,15 +435,25 @@ export default function App() {
           <div className="field-row">
             <input className="field" placeholder="Your name (e.g. Taro Yamada)"
               value={studentName} onChange={e => setStudentName(e.target.value)} />
-            <input className="field" placeholder="Student ID (e.g. 2026001)"
-              value={studentId} onChange={e => setStudentId(e.target.value)} />
+            <input className="field" type="email" required autoComplete="email" aria-label="Email address (required)" placeholder="Email address (required)"
+              disabled={generating} value={email} onChange={e => { setEmail(e.target.value); setUsage(null); setUsageLoading(false); setUsageError(''); setGenError(null) }} />
           </div>
 
           <textarea className="field textarea" rows={4}
             placeholder="Enter keywords, one per line or comma-separated&#10;e.g. fire in downtown, two people injured, firefighters, investigating"
             value={keywords} onChange={e => setKeywords(e.target.value)} />
 
-          <button className="btn-primary" onClick={generate} disabled={generating}>
+          <div className="daily-usage" aria-live="polite">
+            {activeUsage ? <>
+              <div className="daily-usage-heading"><strong>Daily usage</strong><strong>{activeUsage.used} / {activeUsage.limit}</strong></div>
+              <progress max={activeUsage.limit} value={activeUsage.used} aria-label="Daily news generation usage" />
+              <p>{activeUsage.remaining} news generations remaining today.</p>
+              {activeUsage.remaining === 0 && <p className="gen-error">You have reached your daily limit of 10 news generations. Please try again tomorrow!</p>}
+              <p className="hint">Your allowance resets at midnight (JST).</p>
+            </> : <p>{!emailValid ? 'Enter a valid email address to check your daily allowance.' : usageError || (usageLoading ? 'Checking daily usage…' : 'Checking daily usage…')}</p>}
+            {usageError && <button type="button" className="btn-secondary" onClick={() => setDayTick(t => t + 1)}>Retry usage check</button>}
+          </div>
+          <button className="btn-primary" onClick={generate} disabled={generating || !emailValid || !activeUsage || activeUsage.remaining <= 0}>
             {generating ? '⏳ Generating…' : '📰 Generate News Script'}
           </button>
 
@@ -452,7 +498,7 @@ export default function App() {
           <section className="card">
             <h2 className="stage-heading"><span className="stage-pill">2</span>Record Broadcast</h2>
             <SimpleRecorder
-              studentId={studentId}
+              studentId={normalizedEmail.split('@')[0].replace(/[^a-z0-9._-]/g, '_')}
               studentName={studentName}
               onRecordingChange={setIsRecording}
             />
