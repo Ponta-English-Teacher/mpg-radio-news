@@ -285,6 +285,7 @@ function ChunkCard({ text, voice }) {
 export default function App() {
   const [studentName, setStudentName] = useState('')
   const [email, setEmail] = useState('')
+  const [studentId, setStudentId] = useState('')
   const [usage, setUsage] = useState(null)
   const [usageError, setUsageError] = useState('')
   const [usageLoading, setUsageLoading] = useState(false)
@@ -360,6 +361,7 @@ export default function App() {
       setChunksExpanded(true)
     } catch (err) {
       setGenError(err.message)
+      setDayTick(t => t + 1)
     } finally {
       setGenerating(false)
     }
@@ -436,7 +438,8 @@ export default function App() {
             <input className="field" placeholder="Your name (e.g. Taro Yamada)"
               value={studentName} onChange={e => setStudentName(e.target.value)} />
             <input className="field" type="email" required autoComplete="email" aria-label="Email address (required)" placeholder="Email address (required)"
-              disabled={generating} value={email} onChange={e => { setEmail(e.target.value); setUsage(null); setUsageLoading(false); setUsageError(''); setGenError(null) }} />
+              disabled={generating} value={email} onChange={e => { setEmail(e.target.value); if (e.target.value.trim().toLowerCase() !== normalizedEmail) { setUsage(null); setUsageLoading(false); setUsageError(''); setGenError(null) } }} />
+            <input className="field" placeholder="Student ID (optional, recording filename only)" value={studentId} onChange={e => setStudentId(e.target.value)} />
           </div>
 
           <textarea className="field textarea" rows={4}
@@ -498,7 +501,7 @@ export default function App() {
           <section className="card">
             <h2 className="stage-heading"><span className="stage-pill">2</span>Record Broadcast</h2>
             <SimpleRecorder
-              studentId={normalizedEmail.split('@')[0].replace(/[^a-z0-9._-]/g, '_')}
+              studentId={studentId}
               studentName={studentName}
               onRecordingChange={setIsRecording}
             />
