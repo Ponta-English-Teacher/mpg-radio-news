@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import { issueScript } from '../lib/audio-quota.js'
 import { normalizeEmail, quota, LIMIT_MESSAGE } from '../lib/news-quota.js'
 
 // Instantiated lazily inside the handler so a missing key at import time
@@ -107,8 +108,7 @@ Generate a radio news script based on these keywords. The student will read this
       return res.status(500).json({ error: 'Incomplete response from AI. Please try again.' })
     }
 
-    succeeded = true
-    return res.status(200).json({
+    const result = {
       usage,
       opening:  `This is MPG Radio News Station.\nI'm ${name}.`,
       topStory: `Today's top story: ${headline}.`,
@@ -116,7 +116,10 @@ Generate a radio news script based on these keywords. The student will read this
       closing:  `That's all for today's news.\nThank you for tuning in to MPG Radio.`,
       headline,
       chunks: Array.isArray(chunks) ? chunks.slice(0, 10) : [],
-    })
+    }
+    result.ticket = issueScript(email, [result.opening,result.topStory,result.mainNews,result.closing].join('\n\n'))
+    succeeded = true
+    return res.status(200).json(result)
   } catch (err) {
     const status = err?.status ?? 500
     const message = err?.message ?? 'Unexpected error'
