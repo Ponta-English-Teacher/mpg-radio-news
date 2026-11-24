@@ -1,4 +1,5 @@
 import OpenAI from 'openai'
+import { normalizeEmail, quota, LIMIT_MESSAGE } from '../lib/news-quota.js'
 
 // Instantiated lazily inside the handler so a missing key at import time
 // doesn't crash the module during cold starts before the env check runs.
@@ -42,9 +43,21 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  const { studentName, keywords } = req.body ?? {}
+  const { studentName, keywords, email: suppliedEmail, action } = req.body ?? {}
+  const email = normalizeEmail(suppliedEmail)
+  if (!email) return res.status(400).json({ error: 'Please enter a valid email address.' })
+  let counter
+  try {
+    counter = quota(email)
+    if (action === 'usage') {
+      res.setHeader('Cache-Control', 'no-store')
+      return res.status(200).json({ usage: await counter.status() })
+    }
+  } catch {
+    return res.status(503).json({ error: 'Daily usage service unavailable. Please try again later.' })
+  }
 
-  if (!keywords || !keywords.trim()) {
+  if (typeof keywords !== 'string' || !keywords.trim()) {
     return res.status(400).json({ error: 'Keywords are required.' })
   }
 
@@ -52,13 +65,21 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server configuration error: API key not set.' })
   }
 
-  const name = (studentName || '').trim() || 'Your Name'
+  const name = (typeof studentName === 'string' ? studentName.trim() : '') || 'Your Name'
 
   const userPrompt = `Student name: ${name}
 Keywords: ${keywords.trim()}
 
 Generate a radio news script based on these keywords. The student will read this script aloud for pronunciation practice.`
 
+  let usage
+  try {
+    usage = await counter.reserve()
+  } catch {
+    return res.status(503).json({ error: 'Daily usage service unavailable. Please try again later.' })
+  }
+  if (!usage.allowed) return res.status(429).json({ error: LIMIT_MESSAGE, usage })
+  let succeeded = false
   try {
     const completion = await getClient().chat.completions.create({
       model: 'gpt-4o-mini',
@@ -82,11 +103,13 @@ Generate a radio news script based on these keywords. The student will read this
 
     const { headline, mainNews, chunks } = parsed
 
-    if (!headline || !mainNews) {
+    if (typeof headline !== 'string' || !headline.trim() || typeof mainNews !== 'string' || !mainNews.trim()) {
       return res.status(500).json({ error: 'Incomplete response from AI. Please try again.' })
     }
 
+    succeeded = true
     return res.status(200).json({
+      usage,
       opening:  `This is MPG Radio News Station.\nI'm ${name}.`,
       topStory: `Today's top story: ${headline}.`,
       mainNews: mainNews.trim(),
@@ -98,5 +121,9 @@ Generate a radio news script based on these keywords. The student will read this
     const status = err?.status ?? 500
     const message = err?.message ?? 'Unexpected error'
     return res.status(status).json({ error: `OpenAI error: ${message}` })
+  } finally {
+    if (!succeeded) {
+      try { await counter.refund() } catch { console.error('Quota refund failed') }
+    }
   }
 }
